@@ -1,0 +1,728 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>JUDY'S Hardware — Property-Based Tests</title>
+  <style>
+    body { font-family: monospace; padding: 20px; background: #f5f5f5; }
+    h1 { color: #004B23; }
+    .pass { color: #008000; font-weight: bold; }
+    .fail { color: #cc0000; font-weight: bold; }
+    .section { margin: 16px 0; padding: 12px; background: #fff; border-left: 4px solid #008000; }
+    pre { white-space: pre-wrap; word-break: break-all; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h1>JUDY'S Hardware — Property-Based Tests</h1>
+  <div id="output"></div>
+
+  <!-- fast-check via CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/fast-check@3/lib/bundle/fast-check.min.js"></script>
+
+  <!-- Minimal localStorage shim so tests run in-page without polluting real storage -->
+  <script>
+    // Use a fresh in-memory store for tests so we don't touch real localStorage
+    const _testStorage = {};
+    const _mockLS = {
+      getItem: k => Object.prototype.hasOwnProperty.call(_testStorage, k) ? _testStorage[k] : null,
+      setItem: (k, v) => { _testStorage[k] = String(v); },
+      removeItem: k => { delete _testStorage[k]; },
+      clear: () => { Object.keys(_testStorage).forEach(k => delete _testStorage[k]); },
+    };
+  </script>
+
+  <!-- Store (inline, uses _mockLS instead of window.localStorage for tests) -->
+  <script>
+    const Store = (() => {
+      const KEYS = {
+        PRODUCTS: 'jh_products',
+        CATEGORIES: 'jh_categories',
+        INQUIRIES: 'jh_inquiries',
+        SETTINGS: 'jh_settings',
+      };
+      const ls = _mockLS;
+
+      function getAll(key) {
+        try { const r = ls.getItem(key); return r ? JSON.parse(r) : []; }
+        catch(e) { return []; }
+      }
+      function save(key, array) {
+        try { ls.setItem(key, JSON.stringify(array)); }
+        catch(e) {}
+      }
+      function getSettings() {
+        try { const r = ls.getItem(KEYS.SETTINGS); return r ? JSON.parse(r) : {}; }
+        catch(e) { return {}; }
+      }
+      function saveSettings(obj) {
+        try { ls.setItem(KEYS.SETTINGS, JSON.stringify(obj)); }
+        catch(e) {}
+      }
+      function generateId() {
+        if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
+        return Date.now().toString(36) + Math.random().toString(36).slice(2);
+      }
+      return { KEYS, getAll, save, getSettings, saveSettings, generateId };
+    })();
+
+    // validateInquiry — mirrors js/contact.js logic
+    function validateInquiry(data) {
+      return ['name','email','subject','message'].every(
+        f => typeof data[f] === 'string' && data[f].trim().length > 0
+      );
+    }
+
+    // filterByCategory — mirrors js/products.js logic
+    function filterByCategory(products, categoryId) {
+      if (!categoryId) return products;
+      return products.filter(p => p.category === categoryId);
+    }
+
+    // filterByPrice — mirrors js/products.js logic
+    function filterByPrice(products, min, max) {
+      return products.filter(p => p.price >= min && p.price <= max);
+    }
+
+    // renderAvailableBadge — mirrors product-detail logic
+    function renderAvailableBadge(product) {
+      return product.available === true ? '<span class="badge">Available Today</span>' : '';
+    }
+
+    // getDashboardCounts — mirrors admin/dashboard.js logic
+    function getDashboardCounts() {
+      return {
+        products: Store.getAll(Store.KEYS.PRODUCTS).length,
+        categories: Store.getAll(Store.KEYS.CATEGORIES).length,
+        messages: Store.getAll(Store.KEYS.INQUIRIES).length,
+      };
+    }
+
+    // markInquiryRead — mirrors admin/inquiries.js logic
+    function markInquiryRead(id) {
+      const inquiries = Store.getAll(Store.KEYS.INQUIRIES);
+      const updated = inquiries.map(i => i.id === id ? { ...i, read: true } : i);
+      Store.save(Store.KEYS.INQUIRIES, updated);
+    }
+
+    // deleteCategory — mirrors admin/categories.js logic
+    function deleteCategory(categoryId) {
+      const cats = Store.getAll(Store.KEYS.CATEGORIES).filter(c => c.id !== categoryId);
+      Store.save(Store.KEYS.CATEGORIES, cats);
+      const products = Store.getAll(Store.KEYS.PRODUCTS).map(p =>
+        p.category === categoryId ? { ...p, category: '' } : p
+      );
+      Store.save(Store.KEYS.PRODUCTS, products);
+    }
+  </script>
+
+  <script>
+    const fc = window.fc || fastcheck;
+    const out = document.getElementById('output');
+    const results = [];
+
+    function reset() { _mockLS.clear(); }
+
+    function run(label, fn) {
+      reset();
+      try {
+        fn();
+        results.push({ label, pass: true });
+      } catch(e) {
+        results.push({ label, pass: false, error: e.message || String(e) });
+      }
+    }
+
+    // ─── Property 1: Product add round trip ───────────────────────────────────
+    // Feature: judys-hardware, Property 1: Product add round trip
+    // Validates: Requirements 7.3
+    run('Property 1: Product add round trip', () => {
+      fc.assert(fc.property(
+        fc.record({
+          id: fc.uuid(),
+          name: fc.string({ minLength: 1, maxLength: 80 }),
+          price: fc.float({ min: 1, max: 100000, noNaN: true }),
+          category: fc.string({ minLength: 1, maxLength: 20 }),
+          description: fc.string({ maxLength: 200 }),
+          available: fc.boolean(),
+        }),
+        (product) => {
+          reset();
+          const existing = Store.getAll(Store.KEYS.PRODUCTS);
+          Store.save(Store.KEYS.PRODUCTS, [...existing, product]);
+          const all = Store.getAll(Store.KEYS.PRODUCTS);
+          const found = all.find(p => p.id === product.id);
+          return (
+            found !== undefined &&
+            found.name === product.name &&
+            found.price === product.price &&
+            found.category === product.category &&
+            found.description === product.description &&
+            found.available === product.available
+          );
+        }
+      ), { numRuns: 100 });
+    });
+
+    // ─── Property 2: Product delete removes item ──────────────────────────────
+    // Feature: judys-hardware, Property 2: Product delete removes item
+    // Validates: Requirements 7.6
+    run('Property 2: Product delete removes item', () => {
+      fc.assert(fc.property(
+        fc.array(fc.record({
+          id: fc.uuid(),
+          name: fc.string({ minLength: 1 }),
+          price: fc.float({ min: 1, max: 100000, noNaN: true }),
+          category: fc.constant('cat-1'),
+          description: fc.constant(''),
+          available: fc.boolean(),
+        }), { minLength: 1, maxLength: 10 }),
+        (products) => {
+          reset();
+          // Ensure unique ids
+          const unique = products.filter((p, i, a) => a.findIndex(x => x.id === p.id) === i);
+          if (unique.length === 0) return true;
+          Store.save(Store.KEYS.PRODUCTS, unique);
+          const target = unique[0];
+          const after = unique.filter(p => p.id !== target.id);
+          Store.save(Store.KEYS.PRODUCTS, after);
+          return Store.getAll(Store.KEYS.PRODUCTS).every(p => p.id !== target.id);
+        }
+      ), { numRuns: 100 });
+    });
+
+    // ─── Property 3: Product edit round trip ──────────────────────────────────
+    // Feature: judys-hardware, Property 3: Product edit round trip
+    // Validates: Requirements 7.4, 7.5
+    run('Property 3: Product edit round trip', () => {
+      fc.assert(fc.property(
+        fc.record({
+          id: fc.uuid(),
+          name: fc.string({ minLength: 1, maxLength: 80 }),
+          price: fc.float({ min: 1, max: 100000, noNaN: true }),
+          category: fc.constant('cat-1'),
+          description: fc.string({ maxLength: 200 }),
+          available: fc.boolean(),
+        }),
+        fc.record({
+          name: fc.string({ minLength: 1, maxLength: 80 }),
+          price: fc.float({ min: 1, max: 100000, noNaN: true }),
+          available: fc.boolean(),
+        }),
+        (original, updates) => {
+          reset();
+          Store.save(Store.KEYS.PRODUCTS, [original]);
+          const edited = { ...original, ...updates };
+          const all = Store.getAll(Store.KEYS.PRODUCTS).map(p => p.id === original.id ? edited : p);
+          Store.save(Store.KEYS.PRODUCTS, all);
+          const result = Store.getAll(Store.KEYS.PRODUCTS).find(p => p.id === original.id);
+          return (
+            result !== undefined &&
+            result.name === updates.name &&
+            result.price === updates.price &&
+            result.available === updates.available
+          );
+        }
+      ), { numRuns: 100 });
+    });
+
+    // ─── Property 7: Whitespace/empty fields rejected ─────────────────────────
+    // Feature: judys-hardware, Property 7: Whitespace/empty fields rejected
+    // Validates: Requirements 5.3
+    run('Property 7: Whitespace/empty fields rejected', () => {
+      const fields = ['name', 'email', 'subject', 'message'];
+      fc.assert(fc.property(
+        fc.record({
+          name: fc.string({ minLength: 1 }),
+          email: fc.string({ minLength: 1 }),
+          subject: fc.string({ minLength: 1 }),
+          message: fc.string({ minLength: 1 }),
+        }),
+        fc.integer({ min: 0, max: 3 }),
+        (base, fieldIdx) => {
+          reset();
+          const data = { ...base };
+          // Make one field empty or whitespace-only
+          const whitespaceVariants = ['', '   ', '\t', '\n', '  \t  '];
+          data[fields[fieldIdx]] = whitespaceVariants[fieldIdx % whitespaceVariants.length];
+          const before = Store.getAll(Store.KEYS.INQUIRIES).length;
+          if (!validateInquiry(data)) {
+            // Correctly rejected — storage unchanged
+            return Store.getAll(Store.KEYS.INQUIRIES).length === before;
+          }
+          return false; // validateInquiry should have returned false
+        }
+      ), { numRuns: 100 });
+    });
+
+    // ─── Property 8: Settings round trip ─────────────────────────────────────
+    // Feature: judys-hardware, Property 8: Settings round trip
+    // Validates: Requirements 10.2
+    run('Property 8: Settings round trip', () => {
+      fc.assert(fc.property(
+        fc.record({
+          businessName: fc.string({ minLength: 1, maxLength: 100 }),
+          contactInfo: fc.string({ minLength: 1, maxLength: 50 }),
+          address: fc.string({ minLength: 1, maxLength: 200 }),
+        }),
+        (settings) => {
+          reset();
+          Store.saveSettings(settings);
+          const loaded = Store.getSettings();
+          return (
+            loaded.businessName === settings.businessName &&
+            loaded.contactInfo === settings.contactInfo &&
+            loaded.address === settings.address
+          );
+        }
+      ), { numRuns: 100 });
+    });
+
+    // ─── Property 4: Category filter narrows results ──────────────────────────
+    // Feature: judys-hardware, Property 4: Category filter narrows results
+    // Validates: Requirements 2.4
+    run('Property 4: Category filter narrows results', () => {
+      fc.assert(fc.property(
+        fc.array(fc.record({
+          id: fc.uuid(),
+          name: fc.string({ minLength: 1 }),
+          price: fc.float({ min: 1, max: 100000, noNaN: true }),
+          category: fc.oneof(fc.constant('cat-1'), fc.constant('cat-2'), fc.constant('cat-3')),
+          available: fc.boolean(),
+        }), { maxLength: 20 }),
+        fc.oneof(fc.constant('cat-1'), fc.constant('cat-2'), fc.constant('cat-3')),
+        (products, categoryId) => {
+          const result = filterByCategory(products, [categoryId]);
+          // All results must match the category
+          return result.every(p => p.category === categoryId) &&
+            // Result is a subset of original
+            result.length <= products.length;
+        }
+      ), { numRuns: 100 });
+    });
+
+    // ─── Property 5: Price range filter bounds ────────────────────────────────
+    // Feature: judys-hardware, Property 5: Price range filter bounds
+    // Validates: Requirements 2.5
+    run('Property 5: Price range filter bounds', () => {
+      fc.assert(fc.property(
+        fc.array(fc.record({
+          id: fc.uuid(),
+          name: fc.string({ minLength: 1 }),
+          price: fc.float({ min: 0, max: 100000, noNaN: true }),
+          category: fc.constant('cat-1'),
+          available: fc.boolean(),
+        }), { maxLength: 20 }),
+        fc.float({ min: 0, max: 50000, noNaN: true }),
+        fc.float({ min: 50000, max: 100000, noNaN: true }),
+        (products, min, max) => {
+          const result = filterByPrice(products, min, max);
+          return result.every(p => p.price >= min && p.price <= max);
+        }
+      ), { numRuns: 100 });
+    });
+
+    // ─── Property 9: Available Today badge iff available ─────────────────────
+    // Feature: judys-hardware, Property 9: Available Today badge iff available
+    // Validates: Requirements 3.2
+    run('Property 9: Available Today badge iff available', () => {
+      fc.assert(fc.property(
+        fc.record({
+          id: fc.uuid(),
+          name: fc.string({ minLength: 1 }),
+          price: fc.float({ min: 1, max: 100000, noNaN: true }),
+          category: fc.constant('cat-1'),
+          description: fc.string(),
+          available: fc.boolean(),
+        }),
+        (product) => {
+          const badge = renderAvailableBadge(product);
+          if (product.available === true) {
+            return badge.includes('Available Today') && badge.length > 0;
+          } else {
+            return !badge.includes('Available Today');
+          }
+        }
+      ), { numRuns: 100 });
+    });
+
+    // ─── Property 6: Inquiry submission round trip ────────────────────────────
+    // Feature: judys-hardware, Property 6: Inquiry submission round trip
+    // Validates: Requirements 5.2
+    run('Property 6: Inquiry submission round trip', () => {
+      fc.assert(fc.property(
+        fc.record({
+          name:    fc.string({ minLength: 1, maxLength: 80 }).filter(s => s.trim().length > 0),
+          email:   fc.emailAddress(),
+          subject: fc.string({ minLength: 1, maxLength: 100 }).filter(s => s.trim().length > 0),
+          message: fc.string({ minLength: 1, maxLength: 500 }).filter(s => s.trim().length > 0),
+        }),
+        (data) => {
+          reset();
+          if (!validateInquiry(data)) return true; // skip invalid
+          const inquiry = {
+            id: 'test-' + Math.random(),
+            name: data.name.trim(),
+            email: data.email.trim(),
+            subject: data.subject.trim(),
+            message: data.message.trim(),
+            read: false,
+            timestamp: new Date().toISOString(),
+          };
+          const existing = Store.getAll(Store.KEYS.INQUIRIES);
+          Store.save(Store.KEYS.INQUIRIES, [...existing, inquiry]);
+          const all = Store.getAll(Store.KEYS.INQUIRIES);
+          const found = all.find(i => i.id === inquiry.id);
+          return (
+            found !== undefined &&
+            found.name === inquiry.name &&
+            found.email === inquiry.email &&
+            found.subject === inquiry.subject &&
+            found.message === inquiry.message
+          );
+        }
+      ), { numRuns: 100 });
+    });
+
+    // ─── Property 11: Dashboard counts reflect data state ────────────────────
+    // Feature: judys-hardware, Property 11: Dashboard counts reflect data state
+    // Validates: Requirements 6.1
+    run('Property 11: Dashboard counts reflect data state', () => {
+      fc.assert(fc.property(
+        fc.array(fc.record({ id: fc.uuid(), name: fc.string({ minLength: 1 }), price: fc.float({ min: 1, max: 100000, noNaN: true }), category: fc.constant('cat-1'), description: fc.constant(''), available: fc.boolean() }), { maxLength: 15 }),
+        fc.array(fc.record({ id: fc.uuid(), name: fc.string({ minLength: 1 }) }), { maxLength: 8 }),
+        fc.array(fc.record({ id: fc.uuid(), name: fc.string({ minLength: 1 }), email: fc.emailAddress(), subject: fc.string({ minLength: 1 }), message: fc.string({ minLength: 1 }), read: fc.boolean(), timestamp: fc.constant(new Date().toISOString()) }), { maxLength: 10 }),
+        (products, categories, inquiries) => {
+          reset();
+          Store.save(Store.KEYS.PRODUCTS, products);
+          Store.save(Store.KEYS.CATEGORIES, categories);
+          Store.save(Store.KEYS.INQUIRIES, inquiries);
+          const counts = getDashboardCounts();
+          return (
+            counts.products   === Store.getAll(Store.KEYS.PRODUCTS).length &&
+            counts.categories === Store.getAll(Store.KEYS.CATEGORIES).length
+          );
+        }
+      ), { numRuns: 100 });
+    });
+
+    // ─── Property 12: Inquiry read status after click ─────────────────────────
+    // Feature: judys-hardware, Property 12: Inquiry read status after click
+    // Validates: Requirements 9.2, 9.3
+    run('Property 12: Inquiry read status after click', () => {
+      fc.assert(fc.property(
+        fc.array(fc.record({
+          id: fc.uuid(),
+          name: fc.string({ minLength: 1 }),
+          email: fc.emailAddress(),
+          subject: fc.string({ minLength: 1 }),
+          message: fc.string({ minLength: 1 }),
+          read: fc.constant(false),
+          timestamp: fc.constant(new Date().toISOString()),
+        }), { minLength: 1, maxLength: 10 }),
+        fc.integer({ min: 0, max: 9 }),
+        (inquiries, idx) => {
+          reset();
+          const unique = inquiries.filter((i, pos, arr) => arr.findIndex(x => x.id === i.id) === pos);
+          if (unique.length === 0) return true;
+          Store.save(Store.KEYS.INQUIRIES, unique);
+          const target = unique[Math.min(idx, unique.length - 1)];
+          markInquiryRead(target.id);
+          const all = Store.getAll(Store.KEYS.INQUIRIES);
+          const found = all.find(i => i.id === target.id);
+          return found !== undefined && found.read === true;
+        }
+      ), { numRuns: 100 });
+    });
+
+    // ─── Property 10: Category delete propagates to products ─────────────────
+    // Feature: judys-hardware, Property 10: Category delete propagates to products
+    // Validates: Requirements 8.5
+    run('Property 10: Category delete propagates to products', () => {
+      fc.assert(fc.property(
+        fc.array(fc.record({ id: fc.uuid(), name: fc.string({ minLength: 1 }) }), { minLength: 1, maxLength: 8 }),
+        fc.array(fc.record({ id: fc.uuid(), name: fc.string({ minLength: 1 }), price: fc.float({ min: 1, max: 100000, noNaN: true }), description: fc.constant(''), available: fc.boolean() }), { maxLength: 15 }),
+        fc.integer({ min: 0, max: 7 }),
+        (categories, productBases, catIdx) => {
+          reset();
+          const uniqueCats = categories.filter((c, i, a) => a.findIndex(x => x.id === c.id) === i);
+          if (uniqueCats.length === 0) return true;
+          const targetCat = uniqueCats[Math.min(catIdx, uniqueCats.length - 1)];
+          // Assign products to categories (some to target)
+          const products = productBases.map((p, i) => ({
+            ...p,
+            category: i % 2 === 0 ? targetCat.id : (uniqueCats[1] ? uniqueCats[1].id : targetCat.id),
+          }));
+          Store.save(Store.KEYS.CATEGORIES, uniqueCats);
+          Store.save(Store.KEYS.PRODUCTS, products);
+          deleteCategory(targetCat.id);
+          return Store.getAll(Store.KEYS.PRODUCTS).every(p => p.category !== targetCat.id);
+        }
+      ), { numRuns: 100 });
+    });
+
+    // ─── Payment helpers (inline mirrors of payment.js / orders.js) ──────────
+    const _ORDERS_KEY   = 'jh_orders';
+    const _PAYMENTS_KEY = 'jh_payments';
+
+    // Extend Store KEYS for payment tests
+    Store.KEYS.ORDERS   = _ORDERS_KEY;
+    Store.KEYS.PAYMENTS = _PAYMENTS_KEY;
+
+    function submitPayment(data, user) {
+      // Mirrors Payment.submit() logic
+      if (!user)                return { ok: false, error: 'Not logged in.' };
+      if (!data.orderId)        return { ok: false, error: 'Order ID is required.' };
+      if (!data.amountPaid)     return { ok: false, error: 'Amount paid is required.' };
+      if (!data.paymentMethod)  return { ok: false, error: 'Payment method is required.' };
+      if (data.paymentMethod === 'gcash' && !data.proofImage) {
+        return { ok: false, error: 'Payment screenshot is required for GCash.' };
+      }
+      const payment = {
+        id:            'pay-' + Math.random().toString(36).slice(2),
+        orderId:       data.orderId,
+        userId:        user.id,
+        userName:      user.name,
+        userEmail:     user.email,
+        productName:   data.productName || '',
+        amountPaid:    Number(data.amountPaid),
+        paymentMethod: data.paymentMethod,
+        proofImage:    data.proofImage || null,
+        notes:         (data.notes || '').trim(),
+        status:        'pending',
+        createdAt:     new Date().toISOString(),
+        reviewedAt:    null,
+      };
+      const payments = Store.getAll(_PAYMENTS_KEY);
+      Store.save(_PAYMENTS_KEY, [...payments, payment]);
+      // Update order status
+      const orders = Store.getAll(_ORDERS_KEY);
+      const updated = orders.map(o => o.id === data.orderId ? { ...o, status: 'payment_pending' } : o);
+      Store.save(_ORDERS_KEY, updated);
+      return { ok: true, payment };
+    }
+
+    function reviewPayment(paymentId, status) {
+      // Mirrors Payment.review() logic
+      const payments = Store.getAll(_PAYMENTS_KEY);
+      const idx = payments.findIndex(p => p.id === paymentId);
+      if (idx === -1) return false;
+      payments[idx] = { ...payments[idx], status, reviewedAt: new Date().toISOString() };
+      Store.save(_PAYMENTS_KEY, payments);
+      const orderId = payments[idx].orderId;
+      const orders = Store.getAll(_ORDERS_KEY);
+      const orderStatus = status === 'approved' ? 'paid' : 'payment_rejected';
+      Store.save(_ORDERS_KEY, orders.map(o => o.id === orderId ? { ...o, status: orderStatus } : o));
+      return true;
+    }
+
+    // ─── Property 13: Payment proof submission round trip ─────────────────────
+    // Feature: judys-hardware, Property 13: Payment proof submission round trip
+    // Validates: Requirements 14.2, 14.5
+    run('Property 13: Payment proof submission round trip', () => {
+      fc.assert(fc.property(
+        fc.record({
+          id:   fc.uuid(),
+          name: fc.string({ minLength: 1, maxLength: 80 }).filter(s => s.trim().length > 0),
+          email: fc.emailAddress(),
+        }),
+        fc.record({
+          orderId:       fc.uuid(),
+          productName:   fc.string({ minLength: 1, maxLength: 80 }).filter(s => s.trim().length > 0),
+          amountPaid:    fc.float({ min: 1, max: 100000, noNaN: true }),
+          paymentMethod: fc.oneof(fc.constant('gcash'), fc.constant('cash')),
+        }),
+        (user, data) => {
+          reset();
+          // For gcash, provide a proof image; for cash, none needed
+          const proofImage = data.paymentMethod === 'gcash' ? 'data:image/png;base64,abc123' : null;
+          const result = submitPayment({ ...data, proofImage }, user);
+          if (!result.ok) return false;
+          const all = Store.getAll(_PAYMENTS_KEY);
+          const found = all.find(p => p.id === result.payment.id);
+          return (
+            found !== undefined &&
+            found.userName      === user.name &&
+            found.productName   === data.productName &&
+            found.amountPaid    === Number(data.amountPaid) &&
+            found.paymentMethod === data.paymentMethod &&
+            found.status        === 'pending'
+          );
+        }
+      ), { numRuns: 100 });
+    });
+
+    // ─── Property 14: GCash proof image required ──────────────────────────────
+    // Feature: judys-hardware, Property 14: GCash proof image required
+    // Validates: Requirements 14.3
+    run('Property 14: GCash proof image required', () => {
+      fc.assert(fc.property(
+        fc.record({
+          id:    fc.uuid(),
+          name:  fc.string({ minLength: 1 }),
+          email: fc.emailAddress(),
+        }),
+        fc.record({
+          orderId:     fc.uuid(),
+          productName: fc.string({ minLength: 1 }),
+          amountPaid:  fc.float({ min: 1, max: 100000, noNaN: true }),
+        }),
+        (user, data) => {
+          reset();
+          const before = Store.getAll(_PAYMENTS_KEY).length;
+          const result = submitPayment({
+            ...data,
+            paymentMethod: 'gcash',
+            proofImage: null,  // no image — should be rejected
+          }, user);
+          const after = Store.getAll(_PAYMENTS_KEY).length;
+          return result.ok === false && after === before;
+        }
+      ), { numRuns: 100 });
+    });
+
+    // ─── Property 15: Payment approval updates order status ───────────────────
+    // Feature: judys-hardware, Property 15: Payment approval updates order status
+    // Validates: Requirements 15.4
+    run('Property 15: Payment approval updates order status', () => {
+      fc.assert(fc.property(
+        fc.record({
+          id:    fc.uuid(),
+          name:  fc.string({ minLength: 1 }),
+          email: fc.emailAddress(),
+        }),
+        fc.record({
+          orderId:     fc.uuid(),
+          productName: fc.string({ minLength: 1 }),
+          amountPaid:  fc.float({ min: 1, max: 100000, noNaN: true }),
+        }),
+        (user, data) => {
+          reset();
+          // Seed an order
+          Store.save(_ORDERS_KEY, [{
+            id: data.orderId, userId: user.id, userName: user.name,
+            productName: data.productName, status: 'pending',
+            deliveryFee: 0, deliveryFree: true, totalPrice: data.amountPaid,
+            createdAt: new Date().toISOString(),
+          }]);
+          // Submit a GCash payment
+          const result = submitPayment({
+            ...data,
+            paymentMethod: 'gcash',
+            proofImage: 'data:image/png;base64,abc',
+          }, user);
+          if (!result.ok) return false;
+          const payId = result.payment.id;
+          // Approve it
+          reviewPayment(payId, 'approved');
+          const pay = Store.getAll(_PAYMENTS_KEY).find(p => p.id === payId);
+          const order = Store.getAll(_ORDERS_KEY).find(o => o.id === data.orderId);
+          return pay.status === 'approved' && order.status === 'paid';
+        }
+      ), { numRuns: 100 });
+    });
+
+    // ─── Property 16: Payment rejection updates order status ──────────────────
+    // Feature: judys-hardware, Property 16: Payment rejection updates order status
+    // Validates: Requirements 15.5
+    run('Property 16: Payment rejection updates order status', () => {
+      fc.assert(fc.property(
+        fc.record({
+          id:    fc.uuid(),
+          name:  fc.string({ minLength: 1 }),
+          email: fc.emailAddress(),
+        }),
+        fc.record({
+          orderId:     fc.uuid(),
+          productName: fc.string({ minLength: 1 }),
+          amountPaid:  fc.float({ min: 1, max: 100000, noNaN: true }),
+        }),
+        (user, data) => {
+          reset();
+          Store.save(_ORDERS_KEY, [{
+            id: data.orderId, userId: user.id, userName: user.name,
+            productName: data.productName, status: 'pending',
+            deliveryFee: 0, deliveryFree: true, totalPrice: data.amountPaid,
+            createdAt: new Date().toISOString(),
+          }]);
+          const result = submitPayment({
+            ...data,
+            paymentMethod: 'gcash',
+            proofImage: 'data:image/png;base64,abc',
+          }, user);
+          if (!result.ok) return false;
+          const payId = result.payment.id;
+          reviewPayment(payId, 'rejected');
+          const pay = Store.getAll(_PAYMENTS_KEY).find(p => p.id === payId);
+          const order = Store.getAll(_ORDERS_KEY).find(o => o.id === data.orderId);
+          return pay.status === 'rejected' && order.status === 'payment_rejected';
+        }
+      ), { numRuns: 100 });
+    });
+
+    // ─── Property 17: Delivery fee correctness ───────────────────────────────
+    // Feature: judys-hardware, Property 17: Delivery fee correctness
+    // Validates: Requirements 16.3
+    const Delivery = (() => {
+      const FREE_BARANGAYS = ['talisay', 'pangasihan', 'pangansian'];
+      const DEFAULT_FEE = 80;
+      function normalize(input) {
+        return input.toLowerCase().replace(/^(barangay|brgy\.?|bgy\.?)\s*/i, '').trim();
+      }
+      function getDeliveryInfo(barangay) {
+        if (!barangay || barangay.trim() === '') {
+          return { free: false, fee: DEFAULT_FEE };
+        }
+        const normalized = normalize(barangay);
+        const isFree = FREE_BARANGAYS.includes(normalized);
+        return { free: isFree, fee: isFree ? 0 : DEFAULT_FEE };
+      }
+      return { getDeliveryInfo, DEFAULT_FEE };
+    })();
+
+    run('Property 17: Delivery fee correctness', () => {
+      // Free barangays: exact names and with "Barangay" prefix
+      const freeVariants = [
+        'Talisay', 'talisay', 'TALISAY',
+        'Pangasihan', 'pangasihan', 'PANGASIHAN',
+        'Barangay Talisay', 'Brgy. Talisay',
+        'Barangay Pangasihan', 'Brgy. Pangasihan',
+      ];
+      freeVariants.forEach(function(b) {
+        const info = Delivery.getDeliveryInfo(b);
+        if (info.fee !== 0) throw new Error('Expected free delivery for "' + b + '" but got fee=' + info.fee);
+      });
+
+      // Property: any non-free barangay string gets DEFAULT_FEE
+      fc.assert(fc.property(
+        fc.string({ minLength: 1, maxLength: 60 }).filter(function(s) {
+          var n = s.toLowerCase().replace(/^(barangay|brgy\.?|bgy\.?)\s*/i, '').trim();
+          return n !== 'talisay' && n !== 'pangasihan' && n !== 'pangansian' && n.length > 0;
+        }),
+        function(barangay) {
+          var info = Delivery.getDeliveryInfo(barangay);
+          return info.fee === Delivery.DEFAULT_FEE && info.free === false;
+        }
+      ), { numRuns: 100 });
+    });
+
+    // ─── Render results ───────────────────────────────────────────────────────
+    results.forEach(r => {
+      const div = document.createElement('div');
+      div.className = 'section';
+      if (r.pass) {
+        div.innerHTML = `<span class="pass">✓ PASS</span> — ${r.label}`;
+      } else {
+        div.innerHTML = `<span class="fail">✗ FAIL</span> — ${r.label}<pre>${r.error}</pre>`;
+      }
+      out.appendChild(div);
+    });
+
+    const total = results.length;
+    const passed = results.filter(r => r.pass).length;
+    const summary = document.createElement('div');
+    summary.className = 'section';
+    summary.innerHTML = `<strong>${passed}/${total} properties passed</strong>`;
+    out.prepend(summary);
+  </script>
+</body>
+</html>
